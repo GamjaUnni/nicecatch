@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import io from 'socket.io-client';
 import GameLayout from '../../atoms/GameLayout/GameLayout';
 import './LoginPage.scss';
@@ -18,10 +18,16 @@ const Login = () => {
 
   const joinRoom = () => {
     if (username !== '' && room !== '') {
-      socket.emit('join_room', room);
+      socket.emit('join_room', { username, room });
       setShowChat(true);
     }
   };
+
+  useEffect(() => {
+    socket.on('fullRoom', (response) => {
+      console.log(response);
+    });
+  }, []);
 
   return (
     <div className="home">

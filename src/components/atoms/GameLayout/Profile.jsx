@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 
 import movie from '../../../assets/video/movie.mp4';
 import sticker01 from '../../../assets/images/icons/sticker_01.png';
@@ -48,58 +48,192 @@ const iceServers = {
 };
 
 const Profile = ({ socket, username, room }) => {
-  const meRef = useRef();
-  const [rtcPeerConnection, setRtcPeerConnection] = useState();
-  const [stream, setStream] = useState();
+  const meVideoRef = useRef();
+  const remoteVideoRef = useRef();
+  // const remoteRef = useRef({});
+  const rtcPeerConnectionRef = useRef();
+  const localStreamRef = useRef();
+  const remoteStreamRef = useRef();
+  const [myRoomUsers, setMyRoomUsers] = useState([]);
+  const [isRoomCreator, setIsRoomCreator] = useState(false);
   const getUserInfo = async () => {
     const data = { room: room };
     await socket?.emit('myRoomInfo', data);
   };
 
-  // const addLocalTracks = (rtcPeerConnection) => {
-  // localStream.getTracks().forEach((track) => {
-  //   rtcPeerConnection.addTrack(track, localStream);
-  // });
-  // };
+  const addLocalTracks = (rtcPeerConnection) => {
+    localStreamRef.current?.getTracks().forEach((track) => {
+      rtcPeerConnection.addTrack(track, localStreamRef.current);
+    });
+  };
 
-  const setLocalStream = async () => {
+  // 원격지 미디어 정보 세팅
+  const settingRemoteStreamFn = (event) => {
+    console.log('settingRemoteStreamFn');
+    console.log(remoteVideoRef.current);
+    console.log(event.streams);
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = event.streams[0];
+      remoteStreamRef.current = event.stream;
+    }
+  };
+
+  // 로컬 미디어 정보 세팅
+  const settingLocalStreamFn = async () => {
     const mediaConstraints = {
       audio: true,
       video: true,
     };
-    console.log(meRef.current);
+
     try {
-      const currentStream = await navigator.mediaDevices.getUserMedia(
+      const stream = await navigator.mediaDevices.getUserMedia(
         mediaConstraints,
       );
-      // setStream(currentStream);
-      meRef.current.srcObject = currentStream;
+      localStreamRef.current = stream;
+      meVideoRef.current.srcObject = stream;
     } catch (e) {
       console.warn('에러가 발생했습니다', e);
     }
   };
 
+  // createOffer: 새로운 WebRTC세션을 시작하고 원격 피어와 연결을 설정을 시작
+  const createOffer = useCallback(async () => {
+    let sessionDescription;
+    try {
+      sessionDescription = await rtcPeerConnectionRef.current.createOffer();
+      // setLocalDescription:
+      // setRemoteDescription:
+      // 각각 로컬 및 원격 세션 설명을 설정하는데 사용
+      console.log(sessionDescription);
+      rtcPeerConnectionRef.current.setLocalDescription(sessionDescription);
+    } catch (error) {
+      console.error(error);
+    }
+
+    socket?.emit('webrtcOffer', {
+      type: 'webrtc_offer',
+      sdp: sessionDescription,
+      room,
+    });
+  }, [room, socket]);
+
+  const createAnswer = async (rtcPeerConnection) => {
+    let sessionDescription;
+    try {
+      sessionDescription = await rtcPeerConnection.createAnswer();
+      rtcPeerConnection.setLocalDescription(sessionDescription);
+    } catch (error) {
+      console.error(error);
+    }
+
+    socket?.emit('webrtcAnswer', {
+      type: 'webrtc_answer',
+      sdp: sessionDescription,
+      room,
+    });
+  };
+
+  // const createAnswer = useCallback(
+  //   async (rtcPeerConnection) => {
+  //     let sessionDescription;
+  //     try {
+  //       sessionDescription = await rtcPeerConnection.createAnswer();
+  //       rtcPeerConnection.setLocalDescription(sessionDescription);
+  //     } catch (error) {
+  //       console.error(error);
+  //     }
+
+  //     socket?.emit('webrtcAnswer', {
+  //       type: 'webrtcAnswer',
+  //       sdp: sessionDescription,
+  //       room,
+  //     });
+  //   },
+  //   [room, socket],
+  // );
+
+  const sendIceCandidate = useCallback(
+    (event) => {
+      console.log('sendIceCandidate');
+      console.log(event);
+      if (event.candidate) {
+        socket?.emit('webrtcIceCandidate', {
+          room,
+          label: event.candidate.sdpMLineIndex,
+          candidate: event.candidate.candidate,
+        });
+      }
+    },
+    [room, socket],
+  );
+
   // 소켓 정보받기
   useEffect(() => {
     // 유저정보 받기
     socket?.on('myRoomUserInfo', (response) => {
-      console.log(response);
+      console.log('Socket event callback: myRoomUserInfo');
+      const { data } = response;
+      const userInfo = data.map((x) =>
+        x.id === socket?.id ? { ...x, type: 'me' } : { ...x, type: 'other' },
+      );
+      setMyRoomUsers(userInfo);
+      setIsRoomCreator(userInfo.length > 0 ? true : false);
     });
+
     // 화상연결 접근
+    socket?.on('videoChatConnectInit', () => {
+      console.log('Socket event callback: videoChatConnectInit');
+      settingLocalStreamFn();
+    });
+
     socket?.on('videoChatConnect', () => {
-      setLocalStream();
-      socket.emit('start_call', room);
+      console.log('Socket event callback: videoChatConnect');
+      settingLocalStreamFn();
+      socket?.emit('startCall', room);
     });
     // 사용자간 화상연결 시작
-    socket?.on('start_call', async () => {
-      console.log('Socket event callback: start_call');
-      setRtcPeerConnection(new RTCPeerConnection(iceServers));
-      addLocalTracks(rtcPeerConnection);
-      rtcPeerConnection.ontrack = setRemoteStream;
-      rtcPeerConnection.onicecandidate = sendIceCandidate;
-      await createOffer(rtcPeerConnection);
+    socket?.on('startCall', async () => {
+      console.log('Socket event callback: startCall');
+      if (isRoomCreator) {
+        rtcPeerConnectionRef.current = new RTCPeerConnection(iceServers);
+        addLocalTracks(rtcPeerConnectionRef.current);
+        rtcPeerConnectionRef.current.ontrack = settingRemoteStreamFn;
+        rtcPeerConnectionRef.current.onicecandidate = sendIceCandidate;
+        await createOffer(rtcPeerConnectionRef.current);
+      }
     });
-  }, [socket]);
+
+    socket?.on('webrtcOffer', async (event) => {
+      console.log('Socket event callback: webrtcOffer');
+      if (!isRoomCreator) {
+        rtcPeerConnectionRef.current = new RTCPeerConnection(iceServers);
+        addLocalTracks(rtcPeerConnectionRef.current);
+        rtcPeerConnectionRef.current.ontrack = settingRemoteStreamFn;
+        rtcPeerConnectionRef.current.onicecandidate = sendIceCandidate;
+        rtcPeerConnectionRef.current.setRemoteDescription(
+          new RTCSessionDescription(event),
+        );
+        await createAnswer(rtcPeerConnectionRef.current);
+      }
+    });
+
+    socket?.on('webrtcAnswer', (event) => {
+      console.log('Socket event callback: webrtcAnswer');
+      rtcPeerConnectionRef.current.setRemoteDescription(
+        new RTCSessionDescription(event),
+      );
+    });
+
+    socket?.on('webrtcIceCandidate', (event) => {
+      console.log('Socket event callback: webrtcIceCandidate');
+      // ICE candidate configuration.
+      const candidate = new RTCIceCandidate({
+        sdpMLineIndex: event.label,
+        candidate: event.candidate,
+      });
+      rtcPeerConnectionRef.current.addIceCandidate(candidate);
+    });
+  }, [socket, room, createAnswer, createOffer, sendIceCandidate]);
 
   // 처음 프로필 컴포넌트 접근시 유저정보 받아오기
   useEffect(() => {
@@ -109,21 +243,22 @@ const Profile = ({ socket, username, room }) => {
   }, []);
 
   return (
-    <ul>
-      <li className="me">
-        <div className="profile">
-          <video ref={meRef} autoPlay />
-          <em>0</em>
-        </div>
-        <p>{username}</p>
-      </li>
-      {sample.map((user, i) => (
-        <li key={i.toString()}>
+    <ul className="profile_area">
+      {myRoomUsers.map((info, i) => (
+        <li key={info.id} className={info.type}>
           <div className="profile">
-            <img src={user.image} />
-            <em>{user.win}</em>
+            {info.type === 'me' ? (
+              <video ref={meVideoRef} autoPlay />
+            ) : (
+              <video ref={remoteVideoRef} autoPlay />
+              // <video
+              //   ref={(element) => (remoteRef.current[i] = element)}
+              //   autoPlay
+              // />
+            )}
+            <em>0</em>
           </div>
-          <p>{user.name}</p>
+          <p>{info.username}</p>
         </li>
       ))}
     </ul>
